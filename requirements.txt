@@ -1,4 +1,5 @@
 boto3==1.44.9
+dnspython==2.9.2
 duckdb==2.0.0
 psycopg[binary]==3.3.9
 pytest==9.2.0

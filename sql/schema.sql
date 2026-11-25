@@ -176,6 +176,7 @@ CREATE TABLE IF NOT EXISTS contacts (
     verified_status  text NOT NULL DEFAULT 'unverified'
                        CHECK (verified_status IN ('unverified', 'valid', 'invalid', 'risky')),
     verified_at      timestamptz,
+    detail           text,                 -- why risky/invalid, e.g. 'shared by 12 carriers'
     created_at       timestamptz NOT NULL DEFAULT now(),
     updated_at       timestamptz NOT NULL DEFAULT now(),
     UNIQUE (usdot_number, kind, value)
@@ -183,25 +184,77 @@ CREATE TABLE IF NOT EXISTS contacts (
 
 -- Weekly outreach queue, review and outcomes (Phase 6).
 CREATE TABLE IF NOT EXISTS outreach (
-    id            bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    signal_id     bigint NOT NULL REFERENCES signals (id),
-    usdot_number  bigint NOT NULL REFERENCES carriers (usdot_number),
-    contact_id    bigint REFERENCES contacts (id),
-    queue_week    date NOT NULL,          -- Monday of the queue week
-    channel       text CHECK (channel IN ('email', 'phone', 'sms')),
-    status        text NOT NULL DEFAULT 'queued' CHECK (status IN
-                    ('queued', 'approved', 'rejected', 'sent', 'replied', 'bounced', 'won', 'lost')),
-    shadow        boolean NOT NULL DEFAULT true,   -- shadow mode: reviewed but never sent
-    reviewed_by   text,
-    reviewed_at   timestamptz,
-    sent_at       timestamptz,
-    outcome_at    timestamptz,
-    notes         text,
-    created_at    timestamptz NOT NULL DEFAULT now(),
-    updated_at    timestamptz NOT NULL DEFAULT now(),
-    UNIQUE (signal_id, contact_id)
+    id             bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    signal_id      bigint NOT NULL REFERENCES signals (id),
+    usdot_number   bigint NOT NULL REFERENCES carriers (usdot_number),
+    contact_id     bigint REFERENCES contacts (id),   -- NULL: no usable contact yet (enrichment gap)
+    queue_week     date NOT NULL,          -- Monday of the queue week
+    priority       integer NOT NULL,       -- rank within the week, 1 = first
+    channel        text CHECK (channel IN ('email', 'phone', 'sms')),
+    contact_value  text,                   -- the email or phone used, as it was when queued
+    status         text NOT NULL DEFAULT 'queued' CHECK (status IN
+                     ('queued', 'approved', 'rejected', 'sent', 'replied', 'bounced', 'unsubscribed',
+                      'won', 'lost')),
+    shadow         boolean NOT NULL DEFAULT true,   -- shadow mode: reviewed but never sent
+    reviewed_by    text,
+    reviewed_at    timestamptz,
+    sent_at        timestamptz,
+    outcome_at     timestamptz,
+    notes          text,
+    created_at     timestamptz NOT NULL DEFAULT now(),
+    updated_at     timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (usdot_number, queue_week)
 );
 CREATE INDEX IF NOT EXISTS outreach_week_idx ON outreach (queue_week, status);
+
+-- Never contact these: unsubscribes, hard bounces, do-not-contact requests.
+CREATE TABLE IF NOT EXISTS suppressions (
+    kind        text NOT NULL CHECK (kind IN ('email', 'phone', 'usdot')),
+    value       text NOT NULL,
+    reason      text,
+    created_at  timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (kind, value)
+);
+
+-- Every paid vendor call (verification or enrichment), for the monthly credit caps.
+CREATE TABLE IF NOT EXISTS vendor_calls (
+    id            bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    purpose       text NOT NULL CHECK (purpose IN ('verify', 'enrich')),
+    provider      text NOT NULL,
+    usdot_number  bigint,
+    contact_id    bigint REFERENCES contacts (id),
+    credits       integer NOT NULL DEFAULT 1,
+    result        text,
+    created_at    timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS vendor_calls_month_idx ON vendor_calls (purpose, created_at);
+
+-- Pipeline run log: one row per daily/weekly run, with its full JSON report.
+CREATE TABLE IF NOT EXISTS pipeline_runs (
+    id           bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    job          text NOT NULL,
+    started_at   timestamptz NOT NULL,
+    finished_at  timestamptz NOT NULL DEFAULT now(),
+    ok           boolean NOT NULL,
+    report       jsonb NOT NULL
+);
+
+-- Outcomes per signal type: what the "done when" of Phase 6 looks at.
+CREATE OR REPLACE VIEW outreach_outcomes WITH (security_invoker = true) AS
+SELECT s.signal_type,
+       count(*)                                                        AS queued,
+       count(*) FILTER (WHERE o.status = 'rejected')                   AS rejected,
+       count(*) FILTER (WHERE o.sent_at IS NOT NULL)                   AS sent,
+       count(*) FILTER (WHERE o.status = 'replied')                    AS replied,
+       count(*) FILTER (WHERE o.status = 'bounced')                    AS bounced,
+       count(*) FILTER (WHERE o.status = 'won')                        AS won,
+       count(*) FILTER (WHERE o.status = 'lost')                       AS lost,
+       round(100.0 * count(*) FILTER (WHERE o.status IN ('replied', 'won', 'lost'))
+             / NULLIF(count(*) FILTER (WHERE o.sent_at IS NOT NULL), 0), 1) AS reply_rate_pct,
+       round(100.0 * count(*) FILTER (WHERE o.status = 'won')
+             / NULLIF(count(*) FILTER (WHERE o.sent_at IS NOT NULL), 0), 1) AS win_rate_pct
+FROM outreach o JOIN signals s ON s.id = o.signal_id
+GROUP BY s.signal_type;
 
 -- Keep updated_at honest on every table that has it.
 CREATE OR REPLACE FUNCTION set_updated_at() RETURNS trigger LANGUAGE plpgsql AS $$
@@ -233,3 +286,6 @@ ALTER TABLE signals ENABLE ROW LEVEL SECURITY;
 ALTER TABLE signal_checks ENABLE ROW LEVEL SECURITY;
 ALTER TABLE contacts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE outreach ENABLE ROW LEVEL SECURITY;
+ALTER TABLE suppressions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE vendor_calls ENABLE ROW LEVEL SECURITY;
+ALTER TABLE pipeline_runs ENABLE ROW LEVEL SECURITY;

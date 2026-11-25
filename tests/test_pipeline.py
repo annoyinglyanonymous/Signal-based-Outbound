@@ -114,3 +114,16 @@ def test_only_transient_errors_are_retried():
     assert common.retryable(requests.Timeout())
     assert common.retryable(http(429)) and common.retryable(http(503))
     assert not common.retryable(http(400)) and not common.retryable(http(404))
+
+
+def test_queue_mix_fills_shares_then_best_remaining():
+    import outreach
+    pool = [(1, "cancellation"), (2, "cancellation"), (3, "cancellation"), (4, "cancellation"),
+            (5, "renewal"), (6, "new_entrant"), (7, "renewal")]
+    mix = {"cancellation": 50, "renewal": 25, "new_entrant": 25}
+    # size 4: 2 cancellations, 1 renewal, 1 new entrant, kept in priority order
+    assert outreach.pick(pool, 4, mix) == [1, 2, 5, 6]
+    # size 6: shares 3/1/1, the spare slot goes to the best remaining (cancellation 4)
+    assert outreach.pick(pool, 6, mix) == [1, 2, 3, 4, 5, 6]
+    # a type with no candidates gives its share away
+    assert outreach.pick([(1, "renewal"), (2, "renewal")], 2, mix) == [1, 2]
