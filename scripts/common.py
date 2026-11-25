@@ -4,6 +4,7 @@ import io
 import json
 import os
 import pathlib
+import sys
 import time
 
 import requests
@@ -24,20 +25,32 @@ TARGET_FILTER = (
 )
 
 
+def log(msg):
+    """Progress goes to stderr so stdout stays clean for the JSON report."""
+    print(msg, file=sys.stderr, flush=True)
+
+
 def csv_rows(text):
     return max(sum(1 for _ in csv.reader(io.StringIO(text))) - 1, 0)
 
 
-def get(url, params=None, retries=4):
+def retryable(exc):
+    """Network errors, rate limits and server errors can pass on retry; a bad query cannot."""
+    if isinstance(exc, requests.HTTPError):
+        return exc.response is not None and (exc.response.status_code == 429 or exc.response.status_code >= 500)
+    return isinstance(exc, (requests.ConnectionError, requests.Timeout))
+
+
+def get(url, params=None, retries=4, wait=15):
     for attempt in range(1, retries + 1):
         try:
             r = requests.get(url, params=params, headers=HEADERS, timeout=300)
             r.raise_for_status()
             return r
-        except requests.RequestException:
-            if attempt == retries:
+        except requests.RequestException as e:
+            if attempt == retries or not retryable(e):
                 raise
-            time.sleep(15 * attempt)
+            time.sleep(wait * attempt)
 
 
 def metadata(ds_id):
