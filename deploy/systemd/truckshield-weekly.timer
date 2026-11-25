@@ -1,0 +1,9 @@
+[Unit]
+Description=Run the TruckShield weekly job early Sunday, Nepal time
+
+[Timer]
+OnCalendar=Sun *-*-* 00:30:00 Asia/Kathmandu
+Persistent=true
+
+[Install]
+WantedBy=timers.target

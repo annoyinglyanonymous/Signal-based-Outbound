@@ -1,0 +1,16 @@
+[Unit]
+Description=TruckShield weekly run (full pull, reconcile, signals, outreach queue)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=truckshield
+Group=truckshield
+WorkingDirectory=/opt/truckshield/app
+EnvironmentFile=/etc/truckshield.env
+Environment=RAW_DIR=/opt/truckshield/data/raw PARQUET_DIR=/opt/truckshield/data/parquet WORK_DIR=/opt/truckshield/data/work QUEUE_DIR=/opt/truckshield/data/queue REPORT_DIR=/opt/truckshield/data/reports
+ExecStart=/usr/bin/flock /opt/truckshield/run.lock /opt/truckshield/venv/bin/python scripts/run.py weekly
+# The census download alone takes 2 to 3 hours.
+TimeoutStartSec=8h
+Nice=10

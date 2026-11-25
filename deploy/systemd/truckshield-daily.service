@@ -1,0 +1,16 @@
+[Unit]
+Description=TruckShield daily FMCSA run (Motus daily files, load, signals)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=truckshield
+Group=truckshield
+WorkingDirectory=/opt/truckshield/app
+EnvironmentFile=/etc/truckshield.env
+Environment=RAW_DIR=/opt/truckshield/data/raw PARQUET_DIR=/opt/truckshield/data/parquet WORK_DIR=/opt/truckshield/data/work QUEUE_DIR=/opt/truckshield/data/queue REPORT_DIR=/opt/truckshield/data/reports
+# Waits for the weekly run if it is still going (they share the lock).
+ExecStart=/usr/bin/flock /opt/truckshield/run.lock /opt/truckshield/venv/bin/python scripts/run.py daily
+TimeoutStartSec=3h
+Nice=10
