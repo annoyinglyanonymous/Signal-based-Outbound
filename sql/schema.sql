@@ -155,6 +155,15 @@ CREATE TABLE IF NOT EXISTS signals (
 );
 CREATE INDEX IF NOT EXISTS signals_open_idx ON signals (signal_type, signal_date) WHERE status = 'open';
 
+-- Hand checks of signals against SAFER / L&I (Phase 5 accuracy check).
+CREATE TABLE IF NOT EXISTS signal_checks (
+    signal_id   bigint PRIMARY KEY REFERENCES signals (id),
+    correct     boolean NOT NULL,
+    note        text,
+    checked_by  text,
+    checked_at  timestamptz NOT NULL DEFAULT now()
+);
+
 -- Contact points: FMCSA first, vendor enrichment only for gaps (Phase 6).
 CREATE TABLE IF NOT EXISTS contacts (
     id               bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -221,5 +230,6 @@ ALTER TABLE authority_history ENABLE ROW LEVEL SECURITY;
 ALTER TABLE policies ENABLE ROW LEVEL SECURITY;
 ALTER TABLE policy_history ENABLE ROW LEVEL SECURITY;
 ALTER TABLE signals ENABLE ROW LEVEL SECURITY;
+ALTER TABLE signal_checks ENABLE ROW LEVEL SECURITY;
 ALTER TABLE contacts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE outreach ENABLE ROW LEVEL SECURITY;

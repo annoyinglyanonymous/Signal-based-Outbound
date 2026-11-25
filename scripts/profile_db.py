@@ -6,11 +6,9 @@ import sys
 import psycopg
 
 import common
+from signals import SPECIALTY_CARGO
 
 FREE_TIER_MB = 500
-# Working definition of specialty cargo until the signal rules are settled in Phase 5.
-SPECIALTY_CARGO = ["chem", "liqgas", "oilfield", "livestock", "coldfood", "meat", "intermodal",
-                   "passengers", "mobilehome", "drivetow", "motoveh", "logpole", "machlrg", "garbage"]
 
 QUERIES = {
     "carriers": "SELECT count(*) FROM carriers WHERE is_target",
