@@ -31,7 +31,7 @@ free_gb=$(df --output=avail -BG "$BASE" | tail -1 | tr -dc '0-9')
 
 echo "== code"
 [ -f "$KEY" ] || as_app ssh-keygen -q -t ed25519 -N "" -f "$KEY" -C truckshield-deploy
-grep -q github.com "$BASE/.ssh/known_hosts" 2>/dev/null || as_app sh -c "ssh-keyscan -q github.com >> $BASE/.ssh/known_hosts"
+grep -q github.com "$BASE/.ssh/known_hosts" 2>/dev/null || as_app sh -c "ssh-keyscan github.com 2>/dev/null >> $BASE/.ssh/known_hosts"
 if [ ! -d "$BASE/app/.git" ]; then
   if ! as_app git clone -q --branch "$BRANCH" "$REPO_URL" "$BASE/app"; then
     echo
