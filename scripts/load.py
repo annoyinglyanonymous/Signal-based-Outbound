@@ -50,7 +50,7 @@ DOCKET_LIST = "[x FOR x IN [" + ", ".join(
 TABLES = {
     "carriers": {
         "source": "census",
-        "modes": ["initial"],
+        "modes": ["initial", "reconcile"],
         "select": f"""
             {big('dot_number')} AS usdot_number, {t('legal_name')} AS legal_name, {t('dba_name')} AS dba_name,
             {t('status_code')} AS status_code, {t('carrier_operation')} AS carrier_operation,
@@ -73,10 +73,11 @@ TABLES = {
         "key": ["usdot_number"],
         "update": True,
         "winner": "mcs150_date DESC NULLS LAST",
+        "missing": "untarget",   # left the filter: keep the row, stop targeting it
     },
     "authorities": {
         "source": "motus_carrier",
-        "modes": ["initial", "daily"],
+        "modes": ["initial", "daily", "reconcile"],
         "select": f"""
             {big('usdot_number')} AS usdot_number, COALESCE({t('docket_number')}, '') AS docket_number,
             COALESCE({t('op_auth_type')}, '') AS op_auth_type, {t('op_auth_status')} AS op_auth_status,
@@ -90,10 +91,11 @@ TABLES = {
         "key": ["usdot_number", "docket_number", "op_auth_type"],
         "update": True,
         "winner": "op_auth_status",
+        "missing": "delete",     # authority no longer listed
     },
     "authority_history": {
         "source": "motus_authhist",
-        "modes": ["initial", "daily"],
+        "modes": ["initial", "daily", "reconcile"],
         "select": f"""
             {big('usdot_number')} AS usdot_number, COALESCE({t('docket_number')}, '') AS docket_number,
             {t('op_auth_type')} AS op_auth_type, {t('op_auth_status')} AS op_auth_status,
@@ -102,10 +104,11 @@ TABLES = {
         "key": ["usdot_number", "docket_number", "op_auth_type", "op_auth_status", "status_change_date", "reason"],
         "update": False,
         "winner": "reason",
+        "missing": "count",      # history is append-only; just report
     },
     "policies": {
         "source": "motus_insur",
-        "modes": ["initial", "daily"],
+        "modes": ["initial", "daily", "reconcile"],
         "select": f"""
             {big('usdot_number')} AS usdot_number, COALESCE({t('docket_number')}, '') AS docket_number,
             {t('policy_no')} AS policy_no, {t('ins_form_code')} AS ins_form_code,
@@ -118,10 +121,11 @@ TABLES = {
         "key": ["docket_number", "policy_no", "ins_form_code", "effective_date"],
         "update": True,
         "winner": "trans_date DESC NULLS LAST",   # refiled policies: keep the latest filing
+        "missing": "close",      # policy no longer on file
     },
     "policy_history": {
         "source": "motus_inshist",
-        "modes": ["initial", "daily"],
+        "modes": ["initial", "daily", "reconcile"],
         "select": f"""
             {big('usdot_number')} AS usdot_number, COALESCE({t('docket_number')}, '') AS docket_number,
             {t('policy_no')} AS policy_no, {t('ins_form_code')} AS ins_form_code,
@@ -137,6 +141,7 @@ TABLES = {
         "key": ["docket_number", "policy_no", "ins_form_code", "effective_date", "cancl_effective_date"],
         "update": False,
         "winner": "filing_status_reason",
+        "missing": "count",
     },
 }
 
@@ -166,7 +171,22 @@ def build(duck, spec, parquet, source_date):
     return cols
 
 
-def upsert(pg, duck, table, spec, cols):
+def key_text(alias, keys):
+    """One hashable text value per key, so anti-joins on keys with NULLs stay fast."""
+    return "concat_ws('|', " + ", ".join(f"COALESCE({alias}.{k}::text, '<null>')" for k in keys) + ")"
+
+
+MISSING_ACTIONS = {
+    "untarget": "UPDATE {table} t SET is_target = false WHERE t.is_target AND {absent}",
+    "delete": "DELETE FROM {table} t WHERE {absent}",
+    "close": "UPDATE {table} t SET is_current = false WHERE t.is_current AND {absent}",
+    "count": "SELECT count(*) FROM {table} t WHERE {absent}",
+}
+
+
+def upsert(pg, duck, table, spec, cols, reconcile=False):
+    """Copy `staged` into Postgres and upsert it. Returns (inserted, updated, missing):
+    missing is the number of database rows absent from the source (reconcile only)."""
     keys = spec["key"]
     col_list = ", ".join(cols)
     with pg.cursor() as cur:
@@ -190,11 +210,18 @@ def upsert(pg, duck, table, spec, cols):
             ON CONFLICT ({', '.join(keys)}) {action}
             RETURNING (xmax = 0) AS inserted""")
         flags = [r[0] for r in cur.fetchall()]
-    return sum(flags), len(flags) - sum(flags)
+
+        missing = None
+        if reconcile:
+            absent = (f"NOT EXISTS (SELECT 1 FROM (SELECT {key_text('s', keys)} AS k FROM stage s) s "
+                      f"WHERE s.k = {key_text('t', keys)})")
+            cur.execute(MISSING_ACTIONS[spec["missing"]].format(table=table, absent=absent))
+            missing = cur.fetchone()[0] if spec["missing"] == "count" else cur.rowcount
+    return sum(flags), len(flags) - sum(flags), missing
 
 
 def run(mode, date, sample=False, only=None, log=common.log):
-    kind = "sample" if sample else ("full" if mode == "initial" else "daily")
+    kind = "sample" if sample else ("daily" if mode == "daily" else "full")
     folder = PARQUET_DIR / kind / date
     report = {"mode": mode, "date": date, "folder": str(folder), "tables": {}, "ok": True}
 
@@ -216,10 +243,12 @@ def run(mode, date, sample=False, only=None, log=common.log):
                     cols = build(duck, spec, parquet, date)
                     entry["rows_in"] = duck.execute("SELECT count(*) FROM staged").fetchone()[0]
                     log(f"{table}: loading {entry['rows_in']:,} rows")
-                    inserted, updated = upsert(pg, duck, table, spec, cols)
+                    inserted, updated, missing = upsert(pg, duck, table, spec, cols, mode == "reconcile")
                     pg.commit()
                     entry.update(status="ok", inserted=inserted, updated=updated,
                                  unchanged=entry["rows_in"] - inserted - updated)
+                    if mode == "reconcile":
+                        entry[f"missing_from_source_{spec['missing']}"] = missing
             except Exception as e:
                 pg.rollback()
                 entry.update(status="failed", error=str(e))
@@ -241,7 +270,7 @@ def run(mode, date, sample=False, only=None, log=common.log):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--mode", choices=["initial", "daily"], required=True)
+    ap.add_argument("--mode", choices=["initial", "daily", "reconcile"], required=True)
     ap.add_argument("--date", required=True, help="the Parquet folder date to load")
     ap.add_argument("--sample", action="store_true", help="load from data/parquet/sample/ (testing)")
     ap.add_argument("--only", choices=list(TABLES), action="append", help="limit to these tables")

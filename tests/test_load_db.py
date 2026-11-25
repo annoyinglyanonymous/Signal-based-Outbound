@@ -62,3 +62,39 @@ def test_cancelled_policies_close(pg, data_dirs):
     assert report["policies_closed"] == 1
     rows = dict(pg.execute("SELECT policy_no, is_current FROM policies").fetchall())
     assert rows == {"P1": False, "P2": True}
+
+
+def test_reconcile_fixes_drift(pg, data_dirs):
+    auth = lambda dot: {"usdot_number": str(dot), "docket_number": f"MC{dot}", "op_auth_type": "COMMON",
+                        "op_auth_status": "A"}
+    pol = lambda no: {"usdot_number": "1", "docket_number": "MC1", "policy_no": no, "ins_form_code": "91X",
+                      "effective_date": "20250101"}
+    fill(data_dirs["parquet"], census=[carrier(1), carrier(2)], motus=[auth(1), auth(2)],
+         insur=[pol("P1"), pol("P2")])
+    load.run("initial", DAY)
+
+    # A week later: carrier 2 is inactive, its authority is gone, P2 left the file, P3 was missed daily.
+    week = "2026-11-26"
+    fill(data_dirs["parquet"], day=week, census=[carrier(1), carrier(2, status_code="I")],
+         motus=[auth(1)], insur=[pol("P1"), pol("P3")])
+    rec = load.run("reconcile", week)
+    assert rec["ok"], rec
+    assert rec["tables"]["carriers"]["missing_from_source_untarget"] == 1
+    assert rec["tables"]["authorities"]["missing_from_source_delete"] == 1
+    assert rec["tables"]["policies"]["missing_from_source_close"] == 1
+    assert rec["tables"]["policies"]["inserted"] == 1
+    assert pg.execute("SELECT usdot_number FROM carriers WHERE is_target").fetchall() == [(1,)]
+    assert pg.execute("SELECT count(*) FROM authorities").fetchone()[0] == 1
+    assert dict(pg.execute("SELECT policy_no, is_current FROM policies").fetchall()) == \
+        {"P1": True, "P2": False, "P3": True}
+
+    # Carrier 2 back in the filter: targeted again. A clean second reconcile changes nothing else.
+    fill(data_dirs["parquet"], day=week, census=[carrier(1), carrier(2)], motus=[auth(1)],
+         insur=[pol("P1"), pol("P3")])
+    rec = load.run("reconcile", week)
+    assert rec["tables"]["carriers"]["updated"] == 1
+    assert rec["tables"]["policies"]["missing_from_source_close"] == 0
+
+    import pull_full
+    mm = pull_full.mismatches(rec)
+    assert "carriers" not in mm and mm["policies"]["rate_pct"] == 0
