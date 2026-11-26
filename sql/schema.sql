@@ -42,7 +42,7 @@ CREATE TABLE IF NOT EXISTS carriers (
     mcs150_date        date,
     add_date           date,
     is_target          boolean NOT NULL DEFAULT true,   -- false once a carrier drops out of the filter
-    census_date        date NOT NULL,                   -- census file the row last came from
+    census_date        date NOT NULL,                   -- census file the row last changed in
     created_at         timestamptz NOT NULL DEFAULT now(),
     updated_at         timestamptz NOT NULL DEFAULT now()
 );

@@ -100,3 +100,17 @@ def test_every_table_spec_has_a_unique_key_in_schema():
         assert f"CREATE TABLE IF NOT EXISTS {table} (" in schema
         key = ", ".join(spec["key"])
         assert key in schema.replace("\n", " ").replace("        ", ""), table
+
+
+def test_only_transient_errors_are_retried():
+    import requests
+
+    def http(code):
+        r = requests.Response()
+        r.status_code = code
+        return requests.HTTPError(response=r)
+
+    assert common.retryable(requests.ConnectionError())
+    assert common.retryable(requests.Timeout())
+    assert common.retryable(http(429)) and common.retryable(http(503))
+    assert not common.retryable(http(400)) and not common.retryable(http(404))

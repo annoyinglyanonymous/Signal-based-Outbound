@@ -153,7 +153,7 @@ CLOSE_CANCELLED = """
 
 
 def build(duck, spec, parquet, source_date):
-    """Transform and dedupe in DuckDB; returns (relation name, columns)."""
+    """Transform and dedupe into the DuckDB table `staged`; returns its columns."""
     select = spec["select"].replace("$source_date", f"DATE '{source_date}'")
     keys = ", ".join(spec["key"])
     duck.execute(f"""
@@ -193,27 +193,18 @@ def upsert(pg, duck, table, spec, cols):
     return sum(flags), len(flags) - sum(flags)
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--mode", choices=["initial", "daily"], required=True)
-    ap.add_argument("--date", required=True, help="the Parquet folder date to load")
-    ap.add_argument("--sample", action="store_true", help="load from data/parquet/sample/ (testing)")
-    ap.add_argument("--only", choices=list(TABLES), action="append", help="limit to these tables")
-    args = ap.parse_args()
-
-    kind = "sample" if args.sample else ("full" if args.mode == "initial" else "daily")
-    folder = PARQUET_DIR / kind / args.date
-    log = lambda msg: print(msg, file=sys.stderr, flush=True)
-    report = {"mode": args.mode, "date": args.date, "folder": str(folder), "tables": {}, "ok": True}
+def run(mode, date, sample=False, only=None, log=common.log):
+    kind = "sample" if sample else ("full" if mode == "initial" else "daily")
+    folder = PARQUET_DIR / kind / date
+    report = {"mode": mode, "date": date, "folder": str(folder), "tables": {}, "ok": True}
 
     duck = duckdb.connect()
     common.configure(duck, os.getenv("WORK_DIR", "data/work"))
     with psycopg.connect(os.environ["SUPABASE_DB_URL"]) as pg:
-        if args.mode == "initial":
-            pg.execute(SCHEMA.read_text())  # idempotent: creates only what is missing
-            pg.commit()
+        pg.execute(SCHEMA.read_text())  # idempotent: creates only what is missing
+        pg.commit()
         for table, spec in TABLES.items():
-            if args.mode not in spec["modes"] or (args.only and table not in args.only):
+            if mode not in spec["modes"] or (only and table not in only):
                 continue
             parquet = folder / f"{spec['source']}.parquet"
             entry = {"source": str(parquet)}
@@ -222,7 +213,7 @@ def main():
                     entry.update(status="skipped", note="no Parquet file for this date")
                 else:
                     log(f"{table}: preparing")
-                    cols = build(duck, spec, parquet, args.date)
+                    cols = build(duck, spec, parquet, date)
                     entry["rows_in"] = duck.execute("SELECT count(*) FROM staged").fetchone()[0]
                     log(f"{table}: loading {entry['rows_in']:,} rows")
                     inserted, updated = upsert(pg, duck, table, spec, cols)
@@ -235,11 +226,27 @@ def main():
                 report["ok"] = False
             report["tables"][table] = entry
 
-        with pg.cursor() as cur:
-            cur.execute(CLOSE_CANCELLED)
-            report["policies_closed"] = cur.rowcount
-        pg.commit()
+        try:
+            with pg.cursor() as cur:
+                cur.execute(CLOSE_CANCELLED)
+                report["policies_closed"] = cur.rowcount
+            pg.commit()
+        except Exception as e:
+            pg.rollback()
+            report["policies_closed_error"] = str(e)
+            report["ok"] = False
+    duck.close()
+    return report
 
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--mode", choices=["initial", "daily"], required=True)
+    ap.add_argument("--date", required=True, help="the Parquet folder date to load")
+    ap.add_argument("--sample", action="store_true", help="load from data/parquet/sample/ (testing)")
+    ap.add_argument("--only", choices=list(TABLES), action="append", help="limit to these tables")
+    args = ap.parse_args()
+    report = run(args.mode, args.date, args.sample, args.only)
     common.print_report(report)
     sys.exit(0 if report["ok"] else 1)
 
