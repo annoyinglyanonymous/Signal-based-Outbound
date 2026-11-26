@@ -9,6 +9,7 @@ import sys
 import duckdb
 
 import common
+import storage
 
 DATASETS = {
     "motus_carrier": {"id": "nakq-58th", "dates": [], "order_by": "usdot_number, docket_number"},
@@ -26,6 +27,19 @@ STALE_ERROR_HOURS = int(os.getenv("STALE_ERROR_HOURS", "96"))
 RAW_DIR = pathlib.Path(os.getenv("RAW_DIR", "data/raw"))
 PARQUET_DIR = pathlib.Path(os.getenv("PARQUET_DIR", "data/parquet"))
 WORK_DIR = pathlib.Path(os.getenv("WORK_DIR", "data/work"))
+
+
+def archive(entry, name, src_day, parquet):
+    """Copy the day's raw CSVs and Parquet to R2. Re-uploading is harmless, so reruns retry it."""
+    try:
+        raw = RAW_DIR / "daily" / src_day / name
+        keys = storage.upload_dir(raw, f"raw/daily/{src_day}/{name}", "page_*.csv")
+        if storage.upload(parquet, f"parquet/daily/{src_day}/{name}.parquet"):
+            keys.append(parquet.name)
+        entry["r2_files"] = len(keys)
+    except Exception as e:
+        entry["status"] = "r2_failed"   # the Parquet is fine and still gets loaded
+        entry["errors"].append(f"R2 upload failed: {e}")
 
 
 def run_dataset(con, name, cfg, log):
@@ -47,6 +61,8 @@ def run_dataset(con, name, cfg, log):
     if entry["status"] == "stale" or out.exists():
         entry["note"] = "already pulled" if out.exists() else "nothing pulled"
         entry["parquet_file"] = str(out) if out.exists() else None
+        if out.exists():
+            archive(entry, name, src_day, out)
         return entry
 
     expected = common.count_rows(cfg["id"])
@@ -76,6 +92,7 @@ def run_dataset(con, name, cfg, log):
 
         common.write_parquet(con, name, out, cfg["order_by"])
         entry["parquet_file"] = str(out)
+        archive(entry, name, src_day, out)
         return entry
     finally:
         con.execute(f"DROP VIEW IF EXISTS {name}")
